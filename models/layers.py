@@ -156,3 +156,45 @@ def rms_norm(hidden_states: torch.Tensor, variance_epsilon: float) -> torch.Tens
     variance = hidden_states.square().mean(-1, keepdim=True)
     hidden_states = hidden_states * torch.rsqrt(variance + variance_epsilon)
     return hidden_states.to(input_dtype)
+
+
+# Gating mechanism implementation
+class HRMGatingNetwork(nn.Module):
+    """Core gating network for controlling information flow between HRM modules."""
+    
+    def __init__(self, hidden_size: int, num_gates: int = 3, gate_hidden_ratio: float = 0.25,
+                 gate_init_bias: float = -2.2):
+        super().__init__()
+        # Lightweight design: use fraction of hidden size for gate computation
+        gate_hidden = int(hidden_size * gate_hidden_ratio)
+        
+        # Two-layer MLP for gate computation
+        self.gate_proj = nn.Sequential(
+            CastedLinear(hidden_size * 3, gate_hidden, bias=True),
+            nn.SiLU(),  # Smooth activation for gates
+            CastedLinear(gate_hidden, num_gates * hidden_size, bias=True)
+        )
+        
+        # Initialize gates to be slightly open
+        with torch.no_grad():
+            self.gate_proj[-1].bias.fill_(gate_init_bias)
+    
+    def forward(self, z_L: torch.Tensor, z_H: torch.Tensor, 
+                x_input: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Compute gates for L, H, and input channels."""
+        # Concatenate all inputs for gate computation
+        gate_input = torch.cat([z_L, z_H, x_input], dim=-1)
+        
+        # Compute gates through MLP
+        gates = self.gate_proj(gate_input)
+        
+        # Reshape to separate gates
+        gates = gates.view(*gates.shape[:-1], 3, -1)
+        
+        # Apply sigmoid for [0, 1] range
+        gates = torch.sigmoid(gates)
+        
+        # Split into individual gates
+        gate_L, gate_H, gate_X = gates.unbind(dim=-2)
+        
+        return gate_L, gate_H, gate_X

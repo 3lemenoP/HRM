@@ -1,0 +1,50 @@
+# Example configuration for HRM with gating mechanism enabled
+# This demonstrates how to use the Phase 1 gating implementation
+
+# Model configuration
+batch_size: 32
+seq_len: 256
+vocab_size: 1024
+num_puzzle_identifiers: 100
+puzzle_emb_ndim: 128
+
+# Hierarchical cycles
+H_cycles: 3
+L_cycles: 4
+
+# Architecture
+H_layers: 4
+L_layers: 4
+hidden_size: 512
+expansion: 2.0
+num_heads: 8
+pos_encodings: rope
+rope_theta: 10000.0
+rms_norm_eps: 1.0e-5
+
+# Adaptive Computation Time (ACT)
+halt_max_steps: 5
+halt_exploration_prob: 0.1
+
+# Data type
+forward_dtype: bfloat16
+
+# ===== GATING CONFIGURATION =====
+# Enable gating mechanism for adaptive information flow
+use_gating: true
+
+# Fraction of hidden size used for gate computation (default: 0.25)
+# Lower values = more efficient, higher values = more expressive
+gate_hidden_ratio: 0.25
+
+# Initial gate bias (default: -2.2)
+# sigmoid(-2.2) ≈ 0.1, so gates start slightly open
+# More negative = gates start more closed
+# Less negative = gates start more open
+gate_init_bias: -2.2
+
+# Note: With gating enabled, the model will:
+# 1. Learn to dynamically control information flow between H and L modules
+# 2. Adapt the coupling strength based on task requirements
+# 3. Prevent interference between conflicting signals
+# 4. Provide interpretable gate values for analysis 

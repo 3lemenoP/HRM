@@ -1,0 +1,46 @@
+# Architecture configuration for HRM v1 with gating mechanism
+# This config enables adaptive information flow between H and L modules
+
+name: HierarchicalReasoningModel_ACTV1@models.hrm.hrm_act_v1
+
+# Loss configuration
+loss:
+  name: ACTLossHead@models.losses
+  loss_type: softmax_cross_entropy
+
+# Hierarchical architecture
+H_cycles: 3
+L_cycles: 4
+
+H_layers: 4
+L_layers: 4
+
+# Transformer configuration
+hidden_size: 512
+expansion: 2.0
+num_heads: 8
+pos_encodings: rope
+rope_theta: 10000.0
+rms_norm_eps: 1.0e-5
+
+# Adaptive Computation Time (ACT)
+halt_max_steps: 5
+halt_exploration_prob: 0.1
+
+# Data type for forward pass
+forward_dtype: bfloat16
+
+# ===== GATING CONFIGURATION =====
+# Enable adaptive gating mechanism
+use_gating: true
+
+# Fraction of hidden size for gate networks (default: 0.25)
+# Lower = more efficient, higher = more expressive gates
+gate_hidden_ratio: 0.25
+
+# Initial gate bias (default: -2.2)
+# Controls how open gates are initially
+# sigmoid(-2.2) ≈ 0.1 (slightly open)
+# More negative = more closed initially
+# Less negative = more open initially
+gate_init_bias: -2.2 

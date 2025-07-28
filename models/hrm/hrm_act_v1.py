@@ -55,6 +55,11 @@ class HierarchicalReasoningModel_ACTV1Config(BaseModel):
     halt_exploration_prob: float
 
     forward_dtype: str = "bfloat16"
+    
+    # Gating configuration
+    use_gating: bool = False  # Default to False for backward compatibility
+    gate_hidden_ratio: float = 0.25  # Hidden size ratio for gate networks
+    gate_init_bias: float = -2.2  # Initial gate bias (sigmoid(-2.2) ≈ 0.1)
 
 
 class HierarchicalReasoningModel_ACTV1Block(nn.Module):
@@ -99,6 +104,52 @@ class HierarchicalReasoningModel_ACTV1ReasoningModule(nn.Module):
         return hidden_states
 
 
+class HierarchicalReasoningModel_ACTV1ReasoningModule_Gated(nn.Module):
+    """Gated version of the reasoning module with dynamic information flow control."""
+    
+    def __init__(self, layers: List[HierarchicalReasoningModel_ACTV1Block], 
+                 config: HierarchicalReasoningModel_ACTV1Config):
+        super().__init__()
+        self.layers = torch.nn.ModuleList(layers)
+        self.config = config
+        
+        if config.use_gating:
+            from models.layers import HRMGatingNetwork
+            self.gating_network = HRMGatingNetwork(
+                hidden_size=config.hidden_size,
+                gate_hidden_ratio=config.gate_hidden_ratio,
+                gate_init_bias=config.gate_init_bias
+            )
+    
+    def forward(self, hidden_states: torch.Tensor, 
+                secondary_states: torch.Tensor, 
+                input_injection: torch.Tensor, **kwargs) -> torch.Tensor:
+        """Forward pass with optional gated information flow."""
+        
+        if self.config.use_gating and hasattr(self, 'gating_network'):
+            # Compute adaptive gates
+            gate_primary, gate_secondary, gate_input = self.gating_network(
+                hidden_states, secondary_states, input_injection
+            )
+            
+            # Apply gates element-wise
+            gated_primary = gate_primary * hidden_states
+            gated_secondary = gate_secondary * secondary_states
+            gated_input = gate_input * input_injection
+            
+            # Sum gated components
+            hidden_states = gated_primary + gated_secondary + gated_input
+        else:
+            # Original behavior: simple addition
+            hidden_states = hidden_states + secondary_states + input_injection
+        
+        # Process through transformer layers
+        for layer in self.layers:
+            hidden_states = layer(hidden_states=hidden_states, **kwargs)
+        
+        return hidden_states
+
+
 class HierarchicalReasoningModel_ACTV1_Inner(nn.Module):
     def __init__(self, config: HierarchicalReasoningModel_ACTV1Config) -> None:
         super().__init__()
@@ -130,8 +181,24 @@ class HierarchicalReasoningModel_ACTV1_Inner(nn.Module):
             raise NotImplementedError()
 
         # Reasoning Layers
-        self.H_level = HierarchicalReasoningModel_ACTV1ReasoningModule(layers=[HierarchicalReasoningModel_ACTV1Block(self.config) for _i in range(self.config.H_layers)])
-        self.L_level = HierarchicalReasoningModel_ACTV1ReasoningModule(layers=[HierarchicalReasoningModel_ACTV1Block(self.config) for _i in range(self.config.L_layers)])
+        if self.config.use_gating:
+            # Use gated reasoning modules
+            self.H_level = HierarchicalReasoningModel_ACTV1ReasoningModule_Gated(
+                layers=[HierarchicalReasoningModel_ACTV1Block(self.config) for _i in range(self.config.H_layers)],
+                config=self.config
+            )
+            self.L_level = HierarchicalReasoningModel_ACTV1ReasoningModule_Gated(
+                layers=[HierarchicalReasoningModel_ACTV1Block(self.config) for _i in range(self.config.L_layers)],
+                config=self.config
+            )
+        else:
+            # Use original reasoning modules
+            self.H_level = HierarchicalReasoningModel_ACTV1ReasoningModule(
+                layers=[HierarchicalReasoningModel_ACTV1Block(self.config) for _i in range(self.config.H_layers)]
+            )
+            self.L_level = HierarchicalReasoningModel_ACTV1ReasoningModule(
+                layers=[HierarchicalReasoningModel_ACTV1Block(self.config) for _i in range(self.config.L_layers)]
+            )
         
         # Initial states
         self.H_init = nn.Buffer(trunc_normal_init_(torch.empty(self.config.hidden_size, dtype=self.forward_dtype), std=1), persistent=True)
@@ -192,16 +259,50 @@ class HierarchicalReasoningModel_ACTV1_Inner(nn.Module):
             for _H_step in range(self.config.H_cycles):
                 for _L_step in range(self.config.L_cycles):
                     if not ((_H_step == self.config.H_cycles - 1) and (_L_step == self.config.L_cycles - 1)):
-                        z_L = self.L_level(z_L, z_H + input_embeddings, **seq_info)
+                        if self.config.use_gating:
+                            # Gated modules expect separate arguments
+                            z_L = self.L_level(
+                                hidden_states=z_L,
+                                secondary_states=z_H,
+                                input_injection=input_embeddings,
+                                **seq_info
+                            )
+                        else:
+                            # Original modules use combined input
+                            z_L = self.L_level(z_L, z_H + input_embeddings, **seq_info)
 
                 if not (_H_step == self.config.H_cycles - 1):
-                    z_H = self.H_level(z_H, z_L, **seq_info)
+                    if self.config.use_gating:
+                        # H-module receives L-state as secondary, no direct input
+                        z_H = self.H_level(
+                            hidden_states=z_H,
+                            secondary_states=z_L,
+                            input_injection=torch.zeros_like(z_H),
+                            **seq_info
+                        )
+                    else:
+                        # Original H-module update
+                        z_H = self.H_level(z_H, z_L, **seq_info)
 
         assert not z_H.requires_grad and not z_L.requires_grad
 
         # 1-step grad
-        z_L = self.L_level(z_L, z_H + input_embeddings, **seq_info)
-        z_H = self.H_level(z_H, z_L, **seq_info)
+        if self.config.use_gating:
+            z_L = self.L_level(
+                hidden_states=z_L,
+                secondary_states=z_H,
+                input_injection=input_embeddings,
+                **seq_info
+            )
+            z_H = self.H_level(
+                hidden_states=z_H,
+                secondary_states=z_L,
+                input_injection=torch.zeros_like(z_H),
+                **seq_info
+            )
+        else:
+            z_L = self.L_level(z_L, z_H + input_embeddings, **seq_info)
+            z_H = self.H_level(z_H, z_L, **seq_info)
 
         # LM Outputs
         new_carry = HierarchicalReasoningModel_ACTV1InnerCarry(z_H=z_H.detach(), z_L=z_L.detach())  # New carry no grad
