@@ -6,9 +6,20 @@ import torch.nn.functional as F
 
 try:
     from flash_attn_interface import flash_attn_func  # type: ignore[import]
+    USE_FLASH_ATTN = True
 except ImportError:
-    # Fallback to FlashAttention 2
-    from flash_attn import flash_attn_func  # type: ignore[import]
+    try:
+        # Fallback to FlashAttention 2
+        from flash_attn import flash_attn_func  # type: ignore[import]
+        USE_FLASH_ATTN = True
+    except ImportError:
+        # Use PyTorch's built-in attention as final fallback
+        print("Warning: Flash Attention not found. Using PyTorch's built-in attention (slower but functional).")
+        USE_FLASH_ATTN = False
+        
+        # Define dummy function to avoid import errors
+        def flash_attn_func(*args, **kwargs):
+            raise NotImplementedError("Flash Attention not available")
 
 from models.common import trunc_normal_init_
 
@@ -126,13 +137,35 @@ class Attention(nn.Module):
             cos, sin = cos_sin
             query, key = apply_rotary_pos_emb(query, key, cos, sin)
 
-        # flash attn
-        attn_output = flash_attn_func(q=query, k=key, v=value, causal=self.causal)
-        if isinstance(attn_output, tuple):  # fa2 and fa3 compatibility
-            attn_output = attn_output[0]
+        if USE_FLASH_ATTN:
+            # Use Flash Attention
+            attn_output = flash_attn_func(q=query, k=key, v=value, causal=self.causal)
+            if isinstance(attn_output, tuple):  # fa2 and fa3 compatibility
+                attn_output = attn_output[0]
+        else:
+            # Fallback to PyTorch's built-in attention
+            # Reshape for PyTorch attention: [batch, seq_len, heads, head_dim] -> [batch, heads, seq_len, head_dim]
+            query = query.transpose(1, 2)  # [batch, heads, seq_len, head_dim]
+            key = key.transpose(1, 2)
+            value = value.transpose(1, 2)
+            
+            # Create attention mask if causal
+            attn_mask = None
+            if self.causal:
+                attn_mask = torch.triu(torch.ones(seq_len, seq_len, device=query.device, dtype=torch.bool), diagonal=1)
+            
+            # Use PyTorch's scaled dot product attention
+            attn_output = F.scaled_dot_product_attention(
+                query, key, value, 
+                attn_mask=attn_mask, 
+                dropout_p=0.0, 
+                is_causal=False  # We handle causal with explicit mask
+            )
+            # Reshape back: [batch, heads, seq_len, head_dim] -> [batch, seq_len, heads, head_dim]
+            attn_output = attn_output.transpose(1, 2)
 
-        # attn_output: [batch_size, num_heads, seq_len, head_dim]
-        attn_output = attn_output.view(batch_size, seq_len, self.output_size)  # type: ignore
+        # attn_output: [batch_size, seq_len, num_heads, head_dim]
+        attn_output = attn_output.contiguous().view(batch_size, seq_len, self.output_size)
         return self.o_proj(attn_output)
 
 

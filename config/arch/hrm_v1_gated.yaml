@@ -1,11 +1,11 @@
 # Architecture configuration for HRM v1 with gating mechanism
 # This config enables adaptive information flow between H and L modules
 
-name: HierarchicalReasoningModel_ACTV1@models.hrm.hrm_act_v1
+name: hrm.hrm_act_v1@HierarchicalReasoningModel_ACTV1
 
 # Loss configuration
 loss:
-  name: ACTLossHead@models.losses
+  name: losses@ACTLossHead
   loss_type: softmax_cross_entropy
 
 # Hierarchical architecture
@@ -22,6 +22,9 @@ num_heads: 8
 pos_encodings: rope
 rope_theta: 10000.0
 rms_norm_eps: 1.0e-5
+
+# Puzzle embedding dimension (set to hidden_size)
+puzzle_emb_ndim: ${.hidden_size}
 
 # Adaptive Computation Time (ACT)
 halt_max_steps: 5
